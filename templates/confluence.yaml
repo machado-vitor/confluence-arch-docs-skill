@@ -1,0 +1,9 @@
+# Copy to the repo root as confluence.yaml. All values come from gateway tools.
+cloud_id: ""            # getAccessibleAtlassianResources -> id
+space_key: ""           # getConfluenceSpaces -> key
+space_id: ""            # getConfluenceSpaces -> id (some tools want id, some key)
+parent_id: ""           # page under which the architecture tree lives
+docs_root: docs/architecture
+body_format: storage    # storage | markdown — whatever updateConfluencePage accepts here
+mermaid_macro_file: mermaid-macro.xml   # copied from a page that renders (see references/mermaid-macro.md)
+mermaid_macro_name: mermaid             # ac:name of that macro; used when converting remote pages back
