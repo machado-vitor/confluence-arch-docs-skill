@@ -85,12 +85,13 @@ confluence:
 
 | Command | What it does |
 |---|---|
-| `status` | Lists every doc: page_id, remote version, dirty (body changed since sync), never published. |
+| `status` | Lists every doc: page_id, remote version, state (`never-published`, `adopted`, `dirty`, `synced`). Files with `publish: false` are skipped. |
 | `new --kind api\|sequence\|contract\|context\|adr --title "…" --out path` | Scaffolds a page from `templates/` with front matter. |
 | `render <file> [--format storage\|markdown]` | Emits JSON `{title, body, page_id, space_id, parent_id, labels}` ready to pass to the gateway tool. Applies mermaid macro + code macro + layout rules. |
 | `diff <file>` | Local change since `synced_commit` (git) — what the user is about to publish. |
 | `remote-to-md <file> --from remote.json` | Converts a `getConfluencePage` body (storage XML or ADF JSON) back to markdown for a remote-vs-local diff. |
 | `mark-synced <file> --page-id ID --version N` | Records the sync in front matter after a confirmed write. |
+| `adopt <file> --page-id ID --version N [--title …] [--labels a,b]` | Attaches an existing md file to an existing Confluence page (title from H1 if absent). State becomes `adopted` until the first publish. |
 
 ## Workflow: publish a page
 
@@ -111,6 +112,36 @@ confluence:
 7. Payload > ~15 KB: gateway MCP tools have request-size limits. Split into a
    parent page plus child pages (one flow / one API per page) instead of
    fighting the limit.
+
+## Workflow: adopt docs that are already on Confluence
+
+For a repo that already has markdown files published to Confluence by some
+other path (another skill, hand paste, mark). Goal: every such file gets a
+`page_id` so this skill takes over, without creating duplicate pages.
+
+1. Move the files under `docs_root` (or point `docs_root` at where they
+   live). Files that must never go to Confluence get `publish: false` in
+   front matter; they are invisible to `status`.
+2. For each file, find its page: `searchConfluenceUsingCql` with
+   `title = "<H1 of the file>" AND space = "<key>"`, or ask the user for the
+   URL. Note the page id and current `version.number` from `getConfluencePage`.
+3. `adopt <file> --page-id ID --version N [--title "…"] [--labels a,b]`.
+   Title comes from the leading `# H1` when not given; that H1 is moved into
+   front matter (Confluence shows the title once). `status` now says `adopted`.
+4. Reconcile before the first publish: `getConfluencePage` (storage) → save
+   to `remote.json` → `remote-to-md <file> --from remote.json --diff`. This
+   shows what the previous publisher rendered differently (macros, images,
+   panels it used that the markdown does not have). Bring anything worth
+   keeping into the markdown; images cannot be carried over (no attachment
+   tool), so replace them with mermaid or drop them explicitly.
+5. Publish normally (render → diff → yes → `updateConfluencePage` with
+   `version` = remote + 1 → `mark-synced`). The page body now matches this
+   skill's render and future diffs are clean.
+6. Retire the old publish path for these files so there is one writer.
+
+Files that reference other docs (e.g. an "integration reference" md that
+links the two published docs) stay in the repo with `publish: false` unless
+they should become pages themselves.
 
 ## Workflow: check for remote edits (weekly or before a big rewrite)
 

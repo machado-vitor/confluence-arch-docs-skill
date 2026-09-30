@@ -137,6 +137,39 @@ def main():
     assert "no mermaid-macro.xml" in r.stderr, r.stderr
     assert 'ac:name="code"' in json.loads(r.stdout)["body"]
 
+    # adopt: a legacy file with an H1 and no front matter, already on Confluence
+    legacy = tmp / "docs/architecture/legacy/integration-x.md"
+    legacy.parent.mkdir(parents=True)
+    legacy.write_text("# Integration X — reference\n\nSome intro.\n\n## Endpoints\n\n| Method | Path |\n| --- | --- |\n| GET | /x |\n")
+    r = run("adopt", "docs/architecture/legacy/integration-x.md", "--page-id", "777", "--version", "12",
+            "--labels", "architecture,integration", cwd=tmp)
+    assert "adopted as page 777 v12" in r.stdout, r.stdout
+    fm, body = cs.split_front_matter(legacy.read_text())
+    assert fm["title"] == "Integration X — reference" and fm["labels"] == ["architecture", "integration"]
+    assert fm["confluence"]["page_id"] == "777" and fm["confluence"]["version"] == 12
+    assert not body.lstrip().startswith("# "), body  # H1 moved into front matter
+    st = {s["file"]: s["state"] for s in json.loads(run("status", "--json", cwd=tmp).stdout)}
+    assert st["docs/architecture/legacy/integration-x.md"] == "adopted", st
+    # adopting a second file with the same title is refused
+    dup = tmp / "docs/architecture/legacy/dup.md"
+    dup.write_text("# Integration X — reference\n\nx\n")
+    r = run("adopt", "docs/architecture/legacy/dup.md", "--page-id", "778", "--version", "1", cwd=tmp, check=False)
+    assert r.returncode != 0 and "already used" in r.stderr, r.stderr
+    dup.unlink()
+    # adopt outside docs_root is refused
+    (tmp / "NOTES.md").write_text("# notes\n")
+    r = run("adopt", "NOTES.md", "--page-id", "1", "--version", "1", cwd=tmp, check=False)
+    assert r.returncode != 0 and "outside docs_root" in r.stderr, r.stderr
+    # after a real publish + mark-synced the adopted file becomes synced
+    run("mark-synced", "docs/architecture/legacy/integration-x.md", "--page-id", "777", "--version", "13", cwd=tmp)
+    st = {s["file"]: s["state"] for s in json.loads(run("status", "--json", cwd=tmp).stdout)}
+    assert st["docs/architecture/legacy/integration-x.md"] == "synced", st
+
+    # publish: false keeps a file out of status entirely
+    (tmp / "docs/architecture/legacy/scratch.md").write_text("---\npublish: false\n---\n# scratch\n")
+    st = {s["file"] for s in json.loads(run("status", "--json", cwd=tmp).stdout)}
+    assert "docs/architecture/legacy/scratch.md" not in st, st
+
     print("all tests passed in", tmp)
 
 

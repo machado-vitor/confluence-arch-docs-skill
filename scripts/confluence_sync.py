@@ -12,6 +12,7 @@ Commands:
   diff FILE                           local change since last sync (git)
   remote-to-md FILE --from JSON       convert a getConfluencePage body to markdown
   mark-synced FILE --page-id ID --version N
+  adopt FILE --page-id ID --version N   attach an existing md to an existing page
 """
 from __future__ import annotations
 
@@ -140,8 +141,41 @@ def join_front_matter(fm: Dict[str, Any], body: str) -> str:
 
 
 def doc_files(root: Path, cfg: Dict[str, Any]) -> List[Path]:
+    """Every markdown file under docs_root except those with `publish: false`."""
     base = root / cfg["docs_root"]
-    return sorted(p for p in base.rglob("*.md"))
+    out = []
+    for p in sorted(base.rglob("*.md")):
+        fm, _ = split_front_matter(p.read_text())
+        if fm.get("publish") is False:
+            continue
+        out.append(p)
+    return out
+
+
+H1_RE = re.compile(r"^#\s+(.+?)\s*\n+", re.M)
+
+
+def ensure_front_matter(text: str, title: Optional[str] = None,
+                        labels: Optional[List[str]] = None) -> Tuple[Dict[str, Any], str, bool]:
+    """Return (fm, body, changed). Builds front matter from the leading H1 when
+    missing, and strips that H1 from the body (the title lives in front matter)."""
+    fm, body = split_front_matter(text)
+    changed = False
+    m = H1_RE.match(body.lstrip("\n"))
+    if m and (not fm.get("title") or fm["title"] == m.group(1)):
+        fm.setdefault("title", m.group(1))
+        body = body.lstrip("\n")[m.end():]
+        changed = True
+    if title:
+        fm["title"] = title
+        changed = True
+    if not fm.get("title"):
+        sys.exit("no title: pass --title or start the file with '# Title'")
+    if "labels" not in fm:
+        fm["labels"] = labels or ["architecture"]
+        changed = True
+    fm.setdefault("confluence", {})
+    return fm, body, changed
 
 
 # ----------------------------------------------------------------------------
@@ -631,12 +665,18 @@ def cmd_status(a):
             dirty = p["body_sha"] != conf.get("body_sha")
         except SystemExit:
             dirty = True
+        if not conf.get("page_id"):
+            state = "never-published"
+        elif not conf.get("body_sha"):
+            state = "adopted"
+        else:
+            state = "dirty" if dirty else "synced"
         rows.append({
             "file": str(f.relative_to(root)),
             "title": fm.get("title"),
             "page_id": conf.get("page_id") or "",
             "version": conf.get("version") or "",
-            "state": "never-published" if not conf.get("page_id") else ("dirty" if dirty else "synced"),
+            "state": state,
         })
     if a.json:
         print(json.dumps(rows, indent=2, ensure_ascii=False))
@@ -726,6 +766,41 @@ def cmd_mark_synced(a):
     print(f"{f.relative_to(root)}: page {a.page_id} v{a.version} recorded; commit this file")
 
 
+def cmd_adopt(a):
+    """Attach an existing markdown file to an existing Confluence page.
+
+    Builds front matter (title from the leading H1 when absent), records
+    page_id/version, and leaves body_sha empty so `status` reports the file
+    as dirty: the first publish after adopt replaces the page body with this
+    skill's render, which is the point of adopting."""
+    root = find_repo_root(Path.cwd())
+    cfg = load_config(root)
+    f = Path(a.file).resolve()
+    if root / cfg["docs_root"] not in f.parents:
+        sys.exit(f"{f} is outside docs_root ({cfg['docs_root']}); move it there or change docs_root")
+    fm, body, _ = ensure_front_matter(f.read_text(), a.title, a.labels.split(",") if a.labels else None)
+    for other in doc_files(root, cfg):
+        if other.resolve() == f:
+            continue
+        ofm, _ = split_front_matter(other.read_text())
+        if (ofm.get("title") or "").lower() == fm["title"].lower():
+            sys.exit(f"title {fm['title']!r} already used by {other.relative_to(root)}")
+    fm["confluence"] = {
+        "page_id": str(a.page_id),
+        "version": int(a.version),
+        "synced_commit": git(root, "rev-parse", "--short", "HEAD"),
+        "synced_at": dt.datetime.now().astimezone().isoformat(timespec="seconds"),
+        "body_sha": "",
+    }
+    f.write_text(join_front_matter(fm, body))
+    p = render_payload(root, cfg, f, cfg["body_format"])
+    print(f"{f.relative_to(root)}: adopted as page {a.page_id} v{a.version}, title {fm['title']!r}")
+    print("next: fetch the page with getConfluencePage, run `remote-to-md --diff` to see what the previous "
+          "publisher changed, then publish once so Confluence carries this render.")
+    for w in p["warnings"]:
+        print("WARNING:", w, file=sys.stderr)
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = ap.add_subparsers(dest="cmd", required=True)
@@ -739,6 +814,9 @@ def main():
     s.add_argument("--diff", action="store_true"); s.set_defaults(fn=cmd_remote_to_md)
     s = sub.add_parser("mark-synced"); s.add_argument("file"); s.add_argument("--page-id", required=True)
     s.add_argument("--version", required=True); s.set_defaults(fn=cmd_mark_synced)
+    s = sub.add_parser("adopt", help="attach an existing md file to an existing Confluence page")
+    s.add_argument("file"); s.add_argument("--page-id", required=True); s.add_argument("--version", required=True)
+    s.add_argument("--title"); s.add_argument("--labels", help="comma-separated"); s.set_defaults(fn=cmd_adopt)
     a = ap.parse_args()
     a.fn(a)
 
